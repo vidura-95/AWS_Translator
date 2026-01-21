@@ -1,47 +1,49 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
 Description: |
-  Editable IaC for serverless document translation pipeline.
-  Flow: GitHub repo document -> input S3 bucket -> Lambda (Textract+Comprehend+Translate) -> output S3 bucket.
-  Edit parameters below, add your Lambda code to src/ folders, then deploy with `sam deploy --guided`.[web:28][web:21]
+  AWS Translator Pipeline for https://github.com/vidura-95/AWS_Translator
+  Flow: GitHub doc -> input S3 -> Lambda (Textract+Comprehend+Translate) -> output S3.
+  Deploy: sam build && sam deploy --guided.[web:28][attached_file:1]
 
 Parameters:
   GitHubFileUrl:
     Type: String
-    Default: "https://raw.githubusercontent.com/aws-samples/aws-overview-logo-files/main/aws-logo.png"
+    Default: "https://raw.githubusercontent.com/vidura-95/AWS_Translator/main/sample.pdf"
     Description: |
-      Raw GitHub URL of the document to fetch (e.g., PDF/image file).
-      Edit this to your repo's raw file URL.
+      UPDATE THIS: Raw URL of document in your repo to translate.
+      - Add sample.pdf to repo root & push.
+      - Or use README.md: https://raw.githubusercontent.com/vidura-95/AWS_Translator/main/README.md
+      - Test: sam deploy --parameter-overrides GitHubFileUrl=your-url-here
+  InputBucketName:
+    Type: String
+    Default: "aws-translator-input-vidura95"
+    Description: |
+      UPDATE THIS: Make unique with your AWS account ID.
+      Run `aws sts get-caller-identity` → append Account: aws-translator-input-vidura95-123456789012
+  OutputBucketName:
+    Type: String
+    Default: "aws-translator-output-vidura95"
+    Description: |
+      UPDATE THIS: Make unique, e.g., aws-translator-output-vidura95-123456789012
   TargetLanguageCode:
     Type: String
     Default: "de"
-    Description: |
-      Target language for translation (ISO 639-1, e.g., 'de' for German, 'fr' for French).
-      See https://docs.aws.amazon.com/translate/latest/dg/what-is.html for codes.
-  InputBucketName:
-    Type: String
-    Default: "doc-input-bucket-unique"  # Edit to make unique (e.g., add your name/account)
-    Description: Unique name for input S3 bucket.
-  OutputBucketName:
-    Type: String
-    Default: "doc-output-bucket-unique"  # Edit to make unique
-    Description: Unique name for output S3 bucket.
+    Description: Target lang (de=German, fr=French, es=Spanish). https://docs.aws.amazon.com/translate/latest/dg/what-is.html
   FetchSchedule:
     Type: String
-    Default: "rate(1 hour)"  # Edit trigger rate (e.g., 'rate(15 minutes)', 'cron(0 12 * * ? *)')
-    Description: EventBridge schedule for GitHub fetch Lambda.
+    Default: "rate(1 hour)"
+    Description: |
+      Edit for testing: "rate(5 minutes)" or "cron(0/5 * * * ? *)"
   LambdaTimeoutSeconds:
     Type: Number
     Default: 900
-    MinValue: 60
-    MaxValue: 900
-    Description: Timeout for processing Lambda (Textract can take time for large docs).
+    Description: Max 900s for large docs (Textract async possible later).
 
 Globals:
   Function:
-    Runtime: python3.12  # Edit if preferred (e.g., nodejs20.x)
+    Runtime: python3.12
     Timeout: !Ref LambdaTimeoutSeconds
-    MemorySize: 1024
+    MemorySize: 2048  # Increased for Textract
     Environment:
       Variables:
         TARGET_LANGUAGE_CODE: !Ref TargetLanguageCode
@@ -64,12 +66,14 @@ Resources:
               S3Key:
                 Rules:
                   - Name: suffix
-                    Value: ".pdf"  # Edit filter (e.g., add ".png", ".jpg")
+                    Value: ".pdf"  # EDIT: Add ".png,.jpg,.txt" if needed
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
         BlockPublicPolicy: true
         IgnorePublicAcls: true
         RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
 
   DocOutputBucket:
     Type: AWS::S3::Bucket
@@ -84,13 +88,15 @@ Resources:
         BlockPublicPolicy: true
         IgnorePublicAcls: true
         RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
 
   GitHubFetchFunction:
     Type: AWS::Serverless::Function
     Properties:
       CodeUri: src/github_fetch/
       Handler: app.lambda_handler
-      Description: Fetches document from GitHub and stores in input S3.
+      Description: Pulls doc from vidura-95/AWS_Translator GitHub repo to input S3.
       Environment:
         Variables:
           GITHUB_FILE_URL: !Ref GitHubFileUrl
@@ -110,9 +116,7 @@ Resources:
     Properties:
       CodeUri: src/process_document/
       Handler: app.lambda_handler
-      Description: |
-        Extracts text (Textract), analyzes (Comprehend), translates (Translate),
-        stores in output S3.
+      Description: Textract text → Comprehend analysis → Translate → output S3.
       Policies:
         - S3CrudPolicy:
             BucketName: !Ref DocInputBucket
@@ -121,12 +125,15 @@ Resources:
         - Statement:
             Effect: Allow
             Action:
-              - textract:*
+              - textract:DetectDocumentText
+              - textract:AnalyzeDocument  # For tables/forms
             Resource: "*"
         - Statement:
             Effect: Allow
             Action:
-              - comprehend:Detect*
+              - comprehend:DetectDominantLanguage
+              - comprehend:DetectEntities
+              - comprehend:DetectSentiment
             Resource: "*"
         - Statement:
             Effect: Allow
@@ -134,9 +141,8 @@ Resources:
               - translate:TranslateText
             Resource: "*"
       Architectures:
-        - arm64  # Edit to x86_64 if needed
+        - arm64  # Cost-effective; change to x86_64 if issues
 
-  # Lambda permissions for S3 trigger
   S3InvokeProcessPermission:
     Type: AWS::Lambda::Permission
     Properties:
@@ -146,22 +152,12 @@ Resources:
       SourceArn: !GetAtt DocInputBucket.Arn
 
 Outputs:
-  InputBucketName:
-    Description: Input S3 bucket for fetched GitHub documents.
+  StackUrl:
+    Description: "Deployed! Test: Invoke GitHubFetchFunction manually."
+    Value: !Sub "https://${AWS::Region}.console.aws.amazon.com/lambda/home?region=${AWS::Region}/#/functions/${GitHubFetchFunction}?tab=configuration"
+  InputBucket:
     Value: !Ref DocInputBucket
-  OutputBucketName:
-    Description: Output S3 bucket for translated documents.
+  OutputBucket:
     Value: !Ref DocOutputBucket
-  GitHubFetchFunctionArn:
-    Description: ARN of GitHub fetch Lambda.
+  GitHubFetchArn:
     Value: !GetAtt GitHubFetchFunction.Arn
-  ProcessDocumentFunctionArn:
-    Description: ARN of processing Lambda.
-    Value: !GetAtt ProcessDocumentFunction.Arn
-  CloudFormationStack:
-    Description: Stack deployment guide.
-    Value: |
-      1. Save as template.yaml.
-      2. Create src/github_fetch/app.py and src/process_document/app.py with code from previous response.
-      3. `sam build`
-      4. `sam deploy --guided --parameter-overrides GitHubFileUrl=your-url InputBucketName=your-unique-name`
