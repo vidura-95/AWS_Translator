@@ -1,0 +1,167 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: |
+  Editable IaC for serverless document translation pipeline.
+  Flow: GitHub repo document -> input S3 bucket -> Lambda (Textract+Comprehend+Translate) -> output S3 bucket.
+  Edit parameters below, add your Lambda code to src/ folders, then deploy with `sam deploy --guided`.[web:28][web:21]
+
+Parameters:
+  GitHubFileUrl:
+    Type: String
+    Default: "https://raw.githubusercontent.com/aws-samples/aws-overview-logo-files/main/aws-logo.png"
+    Description: |
+      Raw GitHub URL of the document to fetch (e.g., PDF/image file).
+      Edit this to your repo's raw file URL.
+  TargetLanguageCode:
+    Type: String
+    Default: "de"
+    Description: |
+      Target language for translation (ISO 639-1, e.g., 'de' for German, 'fr' for French).
+      See https://docs.aws.amazon.com/translate/latest/dg/what-is.html for codes.
+  InputBucketName:
+    Type: String
+    Default: "doc-input-bucket-unique"  # Edit to make unique (e.g., add your name/account)
+    Description: Unique name for input S3 bucket.
+  OutputBucketName:
+    Type: String
+    Default: "doc-output-bucket-unique"  # Edit to make unique
+    Description: Unique name for output S3 bucket.
+  FetchSchedule:
+    Type: String
+    Default: "rate(1 hour)"  # Edit trigger rate (e.g., 'rate(15 minutes)', 'cron(0 12 * * ? *)')
+    Description: EventBridge schedule for GitHub fetch Lambda.
+  LambdaTimeoutSeconds:
+    Type: Number
+    Default: 900
+    MinValue: 60
+    MaxValue: 900
+    Description: Timeout for processing Lambda (Textract can take time for large docs).
+
+Globals:
+  Function:
+    Runtime: python3.12  # Edit if preferred (e.g., nodejs20.x)
+    Timeout: !Ref LambdaTimeoutSeconds
+    MemorySize: 1024
+    Environment:
+      Variables:
+        TARGET_LANGUAGE_CODE: !Ref TargetLanguageCode
+        OUTPUT_BUCKET: !Ref DocOutputBucket
+
+Resources:
+  DocInputBucket:
+    Type: AWS::S3::Bucket
+    BucketName: !Ref InputBucketName
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: s3:ObjectCreated:*
+            Function: !GetAtt ProcessDocumentFunction.Arn
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: suffix
+                    Value: ".pdf"  # Edit filter (e.g., add ".png", ".jpg")
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  DocOutputBucket:
+    Type: AWS::S3::Bucket
+    BucketName: !Ref OutputBucketName
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  GitHubFetchFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/github_fetch/
+      Handler: app.lambda_handler
+      Description: Fetches document from GitHub and stores in input S3.
+      Environment:
+        Variables:
+          GITHUB_FILE_URL: !Ref GitHubFileUrl
+          INPUT_BUCKET: !Ref DocInputBucket
+      Policies:
+        - S3WritePolicy:
+            BucketName: !Ref DocInputBucket
+      Events:
+        ScheduledFetch:
+          Type: EventBridgeRule
+          Properties:
+            ScheduleExpression: !Ref FetchSchedule
+            State: ENABLED
+
+  ProcessDocumentFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/process_document/
+      Handler: app.lambda_handler
+      Description: |
+        Extracts text (Textract), analyzes (Comprehend), translates (Translate),
+        stores in output S3.
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Ref DocInputBucket
+        - S3WritePolicy:
+            BucketName: !Ref DocOutputBucket
+        - Statement:
+            Effect: Allow
+            Action:
+              - textract:*
+            Resource: "*"
+        - Statement:
+            Effect: Allow
+            Action:
+              - comprehend:Detect*
+            Resource: "*"
+        - Statement:
+            Effect: Allow
+            Action:
+              - translate:TranslateText
+            Resource: "*"
+      Architectures:
+        - arm64  # Edit to x86_64 if needed
+
+  # Lambda permissions for S3 trigger
+  S3InvokeProcessPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ProcessDocumentFunction
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceArn: !GetAtt DocInputBucket.Arn
+
+Outputs:
+  InputBucketName:
+    Description: Input S3 bucket for fetched GitHub documents.
+    Value: !Ref DocInputBucket
+  OutputBucketName:
+    Description: Output S3 bucket for translated documents.
+    Value: !Ref DocOutputBucket
+  GitHubFetchFunctionArn:
+    Description: ARN of GitHub fetch Lambda.
+    Value: !GetAtt GitHubFetchFunction.Arn
+  ProcessDocumentFunctionArn:
+    Description: ARN of processing Lambda.
+    Value: !GetAtt ProcessDocumentFunction.Arn
+  CloudFormationStack:
+    Description: Stack deployment guide.
+    Value: |
+      1. Save as template.yaml.
+      2. Create src/github_fetch/app.py and src/process_document/app.py with code from previous response.
+      3. `sam build`
+      4. `sam deploy --guided --parameter-overrides GitHubFileUrl=your-url InputBucketName=your-unique-name`
